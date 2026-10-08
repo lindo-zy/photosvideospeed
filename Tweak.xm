@@ -236,11 +236,13 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     if (!self.speedButton) {
         UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        button.layer.cornerRadius = 14;
+        UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
+        config.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
+        config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+        button.configuration = config;
         button.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
         button.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
         [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        button.contentEdgeInsets = UIEdgeInsetsMake(6, 10, 6, 10);
         button.translatesAutoresizingMaskIntoConstraints = NO;
         button.accessibilityLabel = @"相册视频倍速";
         [button addTarget:self action:@selector(cycleSpeed) forControlEvents:UIControlEventTouchUpInside];
