@@ -9,6 +9,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CMTime.h>
 #import <QuartzCore/QuartzCore.h>
+#import "PSVVideoDetection.h"
 
 static NSArray<NSNumber *> *PSVSpeeds(void) {
     static NSArray<NSNumber *> *speeds;
@@ -26,6 +27,9 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
 @interface PSVSpeedManager : NSObject
 @property (nonatomic, strong) AVPlayer *player;            // 当前绑定的播放器
+@property (nonatomic, strong) AVPlayerItem *playerItem;    // 相册可能复用同一 AVPlayer 换视频
+@property (nonatomic, assign) NSUInteger playbackGeneration;
+@property (nonatomic, assign) NSUInteger scrubGeneration;
 @property (nonatomic, assign) NSInteger speedIndex;        // 用户选定的倍速下标（默认 1 = 1x）
 @property (nonatomic, strong) CADisplayLink *displayLink;  // 视频可见期间的低频守护（拦系统播放键重置）
 @property (nonatomic, strong) NSTimer *scanTimer;          // 0.5s 兜底扫描（探测视频出现/消失）
@@ -45,6 +49,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 @property (nonatomic, strong) NSLayoutConstraint *panelTopConstraint;  // 面板顶部锚在主视频下缘
 @property (nonatomic, assign) CGRect videoFrameInWindow;               // 扫描得到的主视频层在窗口坐标中的位置
 @property (nonatomic, assign) BOOL panelExpanded;          // 面板展开/收起（默认展开）
+@property (nonatomic, assign) BOOL panelHiddenRequested;
+@property (nonatomic, assign) BOOL expandHiddenRequested;
 
 // 进度条拖动状态
 @property (nonatomic, assign) BOOL userTracking;           // 正在拖进度条
@@ -65,6 +71,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (self) {
         _speedIndex = 1;         // 1x
         _panelExpanded = YES;
+        _panelHiddenRequested = YES;
+        _expandHiddenRequested = YES;
     }
     return self;
 }
@@ -134,58 +142,17 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     return result;
 }
 
-// 迭代找 window 内可见且"像正片"的 AVPlayerLayer；返回子树里可见面积最大者及其在窗口坐标中的位置。
-// 必须迭代 + 已访问集合：相册的 CALayer 树极深且可能成环，递归会打穿主栈（已导致线上 SIGSEGV）。
-- (void)findPlayerLayerInWindow:(UIWindow *)window
-                           best:(AVPlayerLayer **)bestOut
-                           area:(double *)bestArea
-                          frame:(CGRect *)frameOut {
-    NSHashTable *visited = [NSHashTable weakObjectsHashTable];
-    NSMutableArray<CALayer *> *stack = [NSMutableArray array];
-    [stack addObject:window.layer];
-    NSUInteger visitedCount = 0;
-    while (stack.count > 0) {
-        if (++visitedCount > 4096) return; // 层节点数保险丝
-        CALayer *layer = [stack lastObject];
-        [stack removeLastObject];
-        if (!layer || [visited containsObject:layer]) continue;
-        [visited addObject:layer];
-        if (layer.isHidden || layer.opacity < 0.02) continue;
-
-        if ([layer isKindOfClass:[AVPlayerLayer class]]) {
-            AVPlayer *player = ((AVPlayerLayer *)layer).player;
-            AVPlayerItem *item = player.currentItem;
-            if (player && item) {
-                CGSize size = item.presentationSize;
-                double duration = CMTimeGetSeconds(item.duration);
-                // 有画面、时长 > 0.25s：排除实况照片预览和纯音频
-                if (size.width > 1 && size.height > 1 && duration > 0.25) {
-                    CALayer *rootLayer = window.layer;
-                    CGRect rect = [layer convertRect:layer.bounds toLayer:rootLayer];
-                    CGRect visible = CGRectIntersection(rect, rootLayer.bounds);
-                    double area = visible.size.width * visible.size.height;
-                    if (area > *bestArea) {
-                        *bestArea = area;
-                        *bestOut = (AVPlayerLayer *)layer;
-                        // 锚定用可见视频内容区（videoRect）：播放层 frame 含黑边/衬底，
-                        // 直接用层 frame 会把面板放到层底（盖住预览条/菜单）而不是视频内容的下缘
-                        CGRect contentRect = visible;
-                        CGRect videoRect = ((AVPlayerLayer *)layer).videoRect;
-                        if (!CGRectIsEmpty(videoRect)) {
-                            CGRect content = [layer convertRect:videoRect toLayer:rootLayer];
-                            content = CGRectIntersection(content, rootLayer.bounds);
-                            if (!CGRectIsEmpty(content)) contentRect = content;
-                        }
-                        *frameOut = contentRect;
-                    }
-                }
-            }
-        }
-
-        for (CALayer *sub in layer.sublayers) {
-            [stack addObject:sub];
-        }
-    }
+- (BOOL)bindPlayer:(AVPlayer *)player {
+    AVPlayerItem *item = player.currentItem;
+    if (self.player == player && self.playerItem == item) return NO;
+    self.playbackGeneration++;
+    self.scrubGeneration++;
+    self.userTracking = NO;
+    self.resumeAfterScrub = NO;
+    [self.slider cancelTrackingWithEvent:nil];
+    self.player = player;
+    self.playerItem = item;
+    return YES;
 }
 
 - (void)scanNow {
@@ -201,13 +168,10 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     UIWindow *bestWindow = nil;
     CGRect bestFrame = CGRectZero;
     for (UIWindow *window in [self visibleWindows]) {
-        AVPlayerLayer *found = nil;
-        double area = 0;
         CGRect frame = CGRectZero;
-        [self findPlayerLayerInWindow:window best:&found area:&area frame:&frame];
-        // 全屏判定：层面积 ≥ 窗口 35%。网格里实况照片/视频的自动播放小预览直接出局
-        double windowArea = window.bounds.size.width * window.bounds.size.height;
-        if (found && windowArea > 0 && area >= windowArea * 0.35 && area > bestArea) {
+        AVPlayerLayer *found = PSVFindMainVideoLayer(window.layer, &frame);
+        double area = frame.size.width * frame.size.height;
+        if (found && area > bestArea) {
             bestArea = area;
             best = found;
             bestWindow = window;
@@ -217,14 +181,13 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     if (best && bestWindow) {
         AVPlayer *player = best.player;
-        BOOL rebound = (player != self.player);
-        self.player = player;
+        BOOL rebound = [self bindPlayer:player];
         self.videoFrameInWindow = bestFrame; // 面板用它锚定到主视频下缘
-        if (rebound) [self applySpeed]; // 换了播放器：重新施加记忆倍速
+        if (rebound) [self applySpeed]; // 换了播放器或视频：重新施加记忆倍速
         [self updateOverlayVisibilityInWindow:bestWindow];
         [self startDisplayLinkIfNeeded];
     } else {
-        self.player = nil;
+        [self bindPlayer:nil];
         [self updateOverlayVisibilityInWindow:nil];
         self.displayLink.paused = YES;
     }
@@ -296,6 +259,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     // 单行细条：高 28，全部控件垂直居中
     UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
+    panel.hidden = YES;
+    panel.alpha = 0;
     panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
     panel.layer.cornerRadius = 14;
     panel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -390,6 +355,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     // 收起态的展开按钮
     UIButton *expand = [UIButton buttonWithType:UIButtonTypeCustom];
+    expand.hidden = YES;
+    expand.alpha = 0;
     expand.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
     expand.layer.cornerRadius = 9;
     expand.tintColor = [UIColor whiteColor];
@@ -468,18 +435,20 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 }
 
 - (void)fadeView:(UIView *)view hidden:(BOOL)hidden {
-    if (!view || view.hidden == hidden) return;
-    if (hidden) {
-        [UIView animateWithDuration:0.18
-            animations:^{ view.alpha = 0; }
-            completion:^(BOOL finished) {
-                if (finished) view.hidden = YES;
-            }];
-    } else {
-        view.alpha = 0;
-        view.hidden = NO;
-        [UIView animateWithDuration:0.18 animations:^{ view.alpha = 1; }];
-    }
+    if (!view) return;
+    BOOL requested = (view == self.panelView) ? self.panelHiddenRequested : self.expandHiddenRequested;
+    if (requested == hidden) return;
+    if (view == self.panelView) self.panelHiddenRequested = hidden;
+    else self.expandHiddenRequested = hidden;
+    // hidden 在淡出完成前仍为 NO，必须比较目标状态，才能在视频切换时取消旧的隐藏请求。
+    view.hidden = NO;
+    [UIView animateWithDuration:0.18 delay:0
+        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+        animations:^{ view.alpha = hidden ? 0 : 1; }
+        completion:^(BOOL finished) {
+            BOOL stillHidden = (view == self.panelView) ? self.panelHiddenRequested : self.expandHiddenRequested;
+            if (finished && hidden && stillHidden) view.hidden = YES;
+        }];
 }
 
 - (void)togglePanel {
@@ -526,10 +495,18 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     AVPlayerItem *item = player.currentItem;
     if (!player || !item) return;
     double duration = CMTimeGetSeconds(item.duration);
-    if (!(duration > 0.25)) return;
+    BOOL hasDuration = isfinite(duration) && duration > 0;
+    self.slider.enabled = hasDuration;
+    if (!hasDuration) {
+        self.slider.maximumValue = 1;
+        self.slider.value = 0;
+        self.timeLabel.text = @"00:00 / --:--";
+        [self updatePlayButtonIcon];
+        return;
+    }
 
     double t = CMTimeGetSeconds(player.currentTime);
-    if (!(t >= 0)) t = 0;
+    if (!isfinite(t) || t < 0) t = 0;
     if (t > duration) t = duration;
 
     if (fabs(self.slider.maximumValue - duration) > 0.01) {
@@ -546,7 +523,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
 - (void)sliderTouchDown {
     AVPlayer *player = self.player;
-    if (!player) return;
+    if (!player || !self.slider.enabled) return;
+    self.scrubGeneration++;
     self.resumeAfterScrub = (player.rate != 0);
     if (self.resumeAfterScrub) [player pause]; // 暂停后 seek，松手按用户倍速恢复
     self.userTracking = YES;
@@ -571,6 +549,10 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     }
     __weak typeof(self) weakSelf = self;
     double target = self.slider.value;
+    AVPlayerItem *item = player.currentItem;
+    NSUInteger playbackGeneration = self.playbackGeneration;
+    NSUInteger scrubGeneration = self.scrubGeneration;
+    BOOL resumeAfterScrub = self.resumeAfterScrub;
     [player seekToTime:CMTimeMakeWithSeconds(target, 600)
        toleranceBefore:kCMTimeZero
         toleranceAfter:kCMTimeZero
@@ -578,9 +560,12 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             __strong typeof(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) return;
-            if (strongSelf.player != player) return; // 拖动期间换了播放器
+            if (strongSelf.playbackGeneration != playbackGeneration ||
+                strongSelf.scrubGeneration != scrubGeneration ||
+                strongSelf.player != player || player.currentItem != item) return;
             strongSelf.userTracking = NO;
-            if (strongSelf.resumeAfterScrub) [strongSelf applySpeed]; // 按用户倍速恢复播放
+            strongSelf.resumeAfterScrub = NO;
+            if (finished && resumeAfterScrub) [strongSelf forceRateToUserSpeed];
             [strongSelf updateProgressNow];
         });
     }];
