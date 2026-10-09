@@ -1,7 +1,9 @@
 // PhotosVideoSpeed - 系统相册视频倍速播放
 // 思路参考 MobileSlideShowHook：不 hook 系统类，仅在 com.apple.mobileslideshow 内
 // 轮询扫描 CALayer 树找到可见的 AVPlayerLayer，对其 AVPlayer 施加公开 API rate。
-// 支持倍速：0.5x / 1x / 1.5x / 2x / 3x。点按浮动按钮循环切换，长按弹菜单直选。
+// 支持 0.5x / 1x / 1.5x / 2x / 3x。
+// UI：底部播放控制面板（播放/暂停 + 时间 + 进度条 + 倍速 + 收起按钮），
+//     点 chevron.down 收起后只剩右下角 chevron.up 小按钮，点它展开。
 
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -27,10 +29,24 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 @property (nonatomic, assign) NSInteger speedIndex;        // 用户选定的倍速下标（默认 1 = 1x）
 @property (nonatomic, strong) CADisplayLink *displayLink;  // 视频可见期间的低频守护（拦系统播放键重置）
 @property (nonatomic, strong) NSTimer *scanTimer;          // 0.5s 兜底扫描（探测视频出现/消失）
-@property (nonatomic, strong) UIButton *speedButton;
-@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *buttonConstraints;
-@property (nonatomic, weak) UIWindow *hostWindow;
 @property (nonatomic, assign) BOOL appActive;
+
+// 面板 UI
+@property (nonatomic, strong) UIView *panelView;           // 底部控制面板
+@property (nonatomic, strong) UIButton *playButton;
+@property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UISlider *slider;
+@property (nonatomic, strong) UIButton *speedButton;       // "倍速"/"2x"
+@property (nonatomic, strong) UIView *dividerView;
+@property (nonatomic, strong) UIButton *collapseButton;    // 面板内 chevron.down
+@property (nonatomic, strong) UIButton *expandButton;      // 收起后右下角 chevron.up
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *panelPlacement;
+@property (nonatomic, strong) NSArray<NSLayoutConstraint *> *expandPlacement;
+@property (nonatomic, assign) BOOL panelExpanded;          // 面板展开/收起（默认展开）
+
+// 进度条拖动状态
+@property (nonatomic, assign) BOOL userTracking;           // 正在拖进度条
+@property (nonatomic, assign) BOOL resumeAfterScrub;       // 拖动前是否在播放
 @end
 
 @implementation PSVSpeedManager
@@ -45,7 +61,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _speedIndex = 1; // 1x
+        _speedIndex = 1;         // 1x
+        _panelExpanded = YES;
     }
     return self;
 }
@@ -186,14 +203,12 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
         AVPlayer *player = best.player;
         BOOL rebound = (player != self.player);
         self.player = player;
-        self.hostWindow = bestWindow;
         if (rebound) [self applySpeed]; // 换了播放器：重新施加记忆倍速
-        [self showButtonInWindow:bestWindow];
+        [self updateOverlayVisibilityInWindow:bestWindow];
         [self startDisplayLinkIfNeeded];
     } else {
         self.player = nil;
-        self.hostWindow = nil;
-        [self hideButton];
+        [self updateOverlayVisibilityInWindow:nil];
         self.displayLink.paused = YES;
     }
 }
@@ -240,60 +255,304 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (self.userSpeed != 1.0 && player.rate == 1.0) {
         [self applySpeed];
     }
+    [self updatePlayButtonIcon];
 }
 
-#pragma mark - 浮动倍速按钮
+#pragma mark - 面板 UI
 
-- (void)showButtonInWindow:(UIWindow *)window {
-    if (!window) return;
+- (UIImage *)symbol:(NSString *)name pointSize:(CGFloat)size {
+    return [UIImage systemImageNamed:name
+                  withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:size]];
+}
 
-    if (!self.speedButton) {
-        // 固定尺寸胶囊：黑 60% 底 + 白色等宽字。不用自适应尺寸（不同系统版本下会被撑成大方块）
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-        button.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
-        button.layer.cornerRadius = 13;
-        button.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
-        [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        button.translatesAutoresizingMaskIntoConstraints = NO;
-        button.accessibilityLabel = @"相册视频倍速";
-        [button addTarget:self action:@selector(cycleSpeed) forControlEvents:UIControlEventTouchUpInside];
-        [self rebuildMenuForButton:button];
-        [button.widthAnchor constraintEqualToConstant:46].active = YES;
-        [button.heightAnchor constraintEqualToConstant:26].active = YES;
-        self.speedButton = button;
+- (void)buildPanelIfNeeded {
+    if (self.panelView) return;
+
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
+    panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+    panel.layer.cornerRadius = 22;
+    panel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    // 播放/暂停
+    UIButton *play = [UIButton buttonWithType:UIButtonTypeCustom];
+    play.translatesAutoresizingMaskIntoConstraints = NO;
+    play.tintColor = [UIColor whiteColor];
+    [play setImage:[self symbol:@"play.fill" pointSize:20] forState:UIControlStateNormal];
+    [play addTarget:self action:@selector(togglePlayPause) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:play];
+
+    // 时间标签 00:03 / 00:21
+    UILabel *time = [[UILabel alloc] initWithFrame:CGRectZero];
+    time.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
+    time.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
+    time.text = @"00:00 / 00:00";
+    time.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:time];
+
+    // 进度条
+    UISlider *slider = [[UISlider alloc] initWithFrame:CGRectZero];
+    slider.minimumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.95];
+    slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.3];
+    slider.translatesAutoresizingMaskIntoConstraints = NO;
+    [slider addTarget:self action:@selector(sliderTouchDown) forControlEvents:UIControlEventTouchDown];
+    [slider addTarget:self action:@selector(sliderValueChanged) forControlEvents:UIControlEventValueChanged];
+    [slider addTarget:self action:@selector(sliderTouchEnded)
+         forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [panel addSubview:slider];
+
+    // 倍速按钮：1x 时显示"倍速"，其他倍速显示当前速度；点按循环，长按菜单直选
+    UIButton *speed = [UIButton buttonWithType:UIButtonTypeCustom];
+    speed.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [speed setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    speed.translatesAutoresizingMaskIntoConstraints = NO;
+    [speed.widthAnchor constraintGreaterThanOrEqualToConstant:46].active = YES;
+    [speed.heightAnchor constraintGreaterThanOrEqualToConstant:36].active = YES;
+    [speed addTarget:self action:@selector(cycleSpeed) forControlEvents:UIControlEventTouchUpInside];
+    [self rebuildMenuForButton:speed];
+    [panel addSubview:speed];
+
+    // 分隔线 + 收起按钮
+    UIView *divider = [[UIView alloc] initWithFrame:CGRectZero];
+    divider.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    divider.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel addSubview:divider];
+
+    UIButton *collapse = [UIButton buttonWithType:UIButtonTypeCustom];
+    collapse.tintColor = [UIColor whiteColor];
+    [collapse setImage:[self symbol:@"chevron.down" pointSize:17] forState:UIControlStateNormal];
+    collapse.translatesAutoresizingMaskIntoConstraints = NO;
+    [collapse addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:collapse];
+
+    [panel addConstraints:@[
+        [play.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:14],
+        [play.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
+        [play.widthAnchor constraintEqualToConstant:36],
+        [play.heightAnchor constraintEqualToConstant:36],
+
+        [time.leadingAnchor constraintEqualToAnchor:play.trailingAnchor constant:10],
+        [time.topAnchor constraintEqualToAnchor:panel.topAnchor constant:12],
+
+        [slider.leadingAnchor constraintEqualToAnchor:play.trailingAnchor constant:12],
+        [slider.topAnchor constraintEqualToAnchor:time.bottomAnchor constant:2],
+        [slider.heightAnchor constraintEqualToConstant:30],
+
+        [speed.leadingAnchor constraintEqualToAnchor:slider.trailingAnchor constant:6],
+        [speed.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
+
+        [divider.leadingAnchor constraintEqualToAnchor:speed.trailingAnchor constant:8],
+        [divider.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
+        [divider.widthAnchor constraintEqualToConstant:1],
+        [divider.heightAnchor constraintEqualToConstant:40],
+
+        [collapse.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor constant:6],
+        [collapse.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-6],
+        [collapse.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
+        [collapse.widthAnchor constraintEqualToConstant:44],
+        [collapse.heightAnchor constraintEqualToConstant:44],
+    ]];
+    // 面板右缘由 collapse 撑住；slider 右缘贴 speed，time 右缘不强约束
+
+    self.panelView = panel;
+    self.playButton = play;
+    self.timeLabel = time;
+    self.slider = slider;
+    self.speedButton = speed;
+    self.dividerView = divider;
+    self.collapseButton = collapse;
+
+    // 收起态的展开按钮
+    UIButton *expand = [UIButton buttonWithType:UIButtonTypeCustom];
+    expand.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.85];
+    expand.layer.cornerRadius = 18;
+    expand.tintColor = [UIColor whiteColor];
+    [expand setImage:[self symbol:@"chevron.up" pointSize:17] forState:UIControlStateNormal];
+    expand.translatesAutoresizingMaskIntoConstraints = NO;
+    expand.accessibilityLabel = @"展开播放面板";
+    [expand addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    [expand.widthAnchor constraintEqualToConstant:56].active = YES;
+    [expand.heightAnchor constraintEqualToConstant:56].active = YES;
+    self.expandButton = expand;
+
+    [self updateSpeedButtonTitle];
+}
+
+- (void)updateOverlayVisibilityInWindow:(UIWindow *)window {
+    [self buildPanelIfNeeded];
+
+    // 无视频：全部隐藏
+    if (!window) {
+        [self fadeView:self.panelView hidden:YES];
+        [self fadeView:self.expandButton hidden:YES];
+        return;
     }
 
-    if (self.speedButton.window != window) {
-        if (self.buttonConstraints) [NSLayoutConstraint deactivateConstraints:self.buttonConstraints];
-        self.buttonConstraints = nil;
-        [self.speedButton removeFromSuperview];
-        [window addSubview:self.speedButton];
+    // 挂载到目标窗口（窗口变化时迁移）
+    if (self.panelView.window != window) {
+        if (self.panelPlacement) [NSLayoutConstraint deactivateConstraints:self.panelPlacement];
+        self.panelPlacement = nil;
+        [self.panelView removeFromSuperview];
+        [window addSubview:self.panelView];
         UILayoutGuide *safe = window.safeAreaLayoutGuide;
-        self.buttonConstraints = @[
-            [self.speedButton.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
-            [self.speedButton.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-48],
+        self.panelPlacement = @[
+            [self.panelView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
+            [self.panelView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
+            [self.panelView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-10],
+            [self.panelView.heightAnchor constraintEqualToConstant:72],
         ];
-        [NSLayoutConstraint activateConstraints:self.buttonConstraints];
+        [NSLayoutConstraint activateConstraints:self.panelPlacement];
+    }
+    if (self.expandButton.window != window) {
+        if (self.expandPlacement) [NSLayoutConstraint deactivateConstraints:self.expandPlacement];
+        self.expandPlacement = nil;
+        [self.expandButton removeFromSuperview];
+        [window addSubview:self.expandButton];
+        UILayoutGuide *safe = window.safeAreaLayoutGuide;
+        self.expandPlacement = @[
+            [self.expandButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+            [self.expandButton.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-20],
+        ];
+        [NSLayoutConstraint activateConstraints:self.expandPlacement];
     }
 
-    self.speedButton.hidden = NO;
-    self.speedButton.alpha = 1;
-    [window bringSubviewToFront:self.speedButton];
-    [self updateButtonTitle];
+    [window bringSubviewToFront:self.panelView];
+    [window bringSubviewToFront:self.expandButton];
+
+    if (self.panelExpanded) {
+        [self fadeView:self.panelView hidden:NO];
+        [self fadeView:self.expandButton hidden:YES];
+    } else {
+        [self fadeView:self.panelView hidden:YES];
+        [self fadeView:self.expandButton hidden:NO];
+    }
+    [self updateProgressNow];
 }
 
-- (void)hideButton {
-    UIButton *button = self.speedButton;
-    if (!button || button.hidden) return;
-    [UIView animateWithDuration:0.15
-        animations:^{ button.alpha = 0; }
-        completion:^(BOOL finished) {
-            if (finished) button.hidden = YES;
-        }];
+- (void)fadeView:(UIView *)view hidden:(BOOL)hidden {
+    if (!view || view.hidden == hidden) return;
+    if (hidden) {
+        [UIView animateWithDuration:0.18
+            animations:^{ view.alpha = 0; }
+            completion:^(BOOL finished) {
+                if (finished) view.hidden = YES;
+            }];
+    } else {
+        view.alpha = 0;
+        view.hidden = NO;
+        [UIView animateWithDuration:0.18 animations:^{ view.alpha = 1; }];
+    }
 }
 
-- (void)updateButtonTitle {
-    [self.speedButton setTitle:PSVSpeedLabels()[self.speedIndex] forState:UIControlStateNormal];
+- (void)togglePanel {
+    self.panelExpanded = !self.panelExpanded;
+    UIWindow *window = self.panelView.window ?: self.expandButton.window;
+    [self updateOverlayVisibilityInWindow:window];
+}
+
+#pragma mark - 播放/暂停
+
+- (void)togglePlayPause {
+    AVPlayer *player = self.player;
+    if (!player) return;
+    if (player.rate != 0) {
+        player.rate = 0;     // 暂停
+    } else {
+        [self applySpeed];   // 直接以用户倍速恢复，不走 play()（会把速度重置为 1x）
+    }
+    [self updatePlayButtonIcon];
+}
+
+- (void)updatePlayButtonIcon {
+    AVPlayer *player = self.player;
+    NSString *name = (player && player.rate != 0) ? @"pause.fill" : @"play.fill";
+    UIImage *current = [self.playButton imageForState:UIControlStateNormal];
+    if ([current.description rangeOfString:name].location == NSNotFound) {
+        [self.playButton setImage:[self symbol:name pointSize:20] forState:UIControlStateNormal];
+    }
+}
+
+#pragma mark - 进度条
+
+- (NSString *)timeString:(double)seconds {
+    if (!(seconds > 0)) seconds = 0; // 滤掉 NaN/负数
+    long total = (long)seconds;
+    if (total >= 3600) {
+        return [NSString stringWithFormat:@"%ld:%02ld:%02ld", total / 3600, (total / 60) % 60, total % 60];
+    }
+    return [NSString stringWithFormat:@"%02ld:%02ld", total / 60, total % 60];
+}
+
+- (void)updateProgressNow {
+    AVPlayer *player = self.player;
+    AVPlayerItem *item = player.currentItem;
+    if (!player || !item) return;
+    double duration = CMTimeGetSeconds(item.duration);
+    if (!(duration > 0.25)) return;
+
+    double t = CMTimeGetSeconds(player.currentTime);
+    if (!(t >= 0)) t = 0;
+    if (t > duration) t = duration;
+
+    if (fabs(self.slider.maximumValue - duration) > 0.01) {
+        [self.slider setMaximumValue:(float)duration];
+    }
+    if (!self.userTracking) {
+        [self.slider setValue:(float)t animated:NO];
+        NSString *text = [NSString stringWithFormat:@"%@ / %@",
+                          [self timeString:t], [self timeString:duration]];
+        if (![self.timeLabel.text isEqualToString:text]) self.timeLabel.text = text;
+    }
+    [self updatePlayButtonIcon];
+}
+
+- (void)sliderTouchDown {
+    AVPlayer *player = self.player;
+    if (!player) return;
+    self.resumeAfterScrub = (player.rate != 0);
+    if (self.resumeAfterScrub) [player pause]; // 暂停后 seek，松手按用户倍速恢复
+    self.userTracking = YES;
+}
+
+- (void)sliderValueChanged {
+    AVPlayer *player = self.player;
+    if (!player || !self.userTracking) return;
+    AVPlayerItem *item = player.currentItem;
+    double duration = item ? CMTimeGetSeconds(item.duration) : 0;
+    NSString *text = [NSString stringWithFormat:@"%@ / %@",
+                      [self timeString:self.slider.value], [self timeString:duration]];
+    self.timeLabel.text = text;
+}
+
+- (void)sliderTouchEnded {
+    if (!self.userTracking) return;
+    AVPlayer *player = self.player;
+    if (!player) {
+        self.userTracking = NO;
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    double target = self.slider.value;
+    [player seekToTime:CMTimeMakeWithSeconds(target, 600)
+       toleranceBefore:kCMTimeZero
+        toleranceAfter:kCMTimeZero
+     completionHandler:^(BOOL finished) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (strongSelf.player != player) return; // 拖动期间换了播放器
+            strongSelf.userTracking = NO;
+            if (strongSelf.resumeAfterScrub) [strongSelf applySpeed]; // 按用户倍速恢复播放
+            [strongSelf updateProgressNow];
+        });
+    }];
+}
+
+#pragma mark - 倍速
+
+- (void)updateSpeedButtonTitle {
+    // 1x 显示"倍速"（与设计稿一致），非 1x 显示当前速度
+    NSString *title = (self.speedIndex == 1) ? @"倍速" : PSVSpeedLabels()[self.speedIndex];
+    [self.speedButton setTitle:title forState:UIControlStateNormal];
 }
 
 - (void)rebuildMenuForButton:(UIButton *)button {
@@ -318,7 +577,7 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (index < 0 || index >= (NSInteger)PSVSpeeds().count) return;
     // 必须直接写 ivar：speedIndex 的 setter 就是本方法，self.speedIndex = index 会无限递归（0.0.2 点按钮爆栈的根因）
     _speedIndex = index;
-    [self updateButtonTitle];
+    [self updateSpeedButtonTitle];
     [self rebuildMenuForButton:self.speedButton];
     [self applySpeed];
 }
