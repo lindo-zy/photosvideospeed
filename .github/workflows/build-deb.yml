@@ -1,0 +1,98 @@
+name: Build deb & Release
+
+# 推送 v* 格式 tag（如 v0.0.11）时触发：构建 iOS 16 / iOS 17 双平台 deb
+# （参数与本地 ./build.sh 一致），归档为 workflow artifact 并挂到该 tag 的
+# GitHub Release。包版本号取自 tag（去掉 v 前缀），不读 control 的 Version，
+# 推荐流程：本地 ./build.sh 推进版本并提交后，打同名 tag 推送。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      THEOS: /home/runner/theos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Theos
+        uses: actions/cache@v4
+        id: theos
+        with:
+          path: ~/theos
+          # 工具链/SDK 变更需手动升 suffix（v1 -> v2）以刷新缓存
+          key: theos-roothide-linux-v1
+
+      # roothide fork 的官方 installer：克隆 roothide/theos、装 LLVM 工具链
+      # （CI 环境自动跳过交互）、apt 安装 ldid/fakeroot 等依赖、并
+      # install-sdk latest（当前即 iPhoneOS16.5.sdk，来自 theos/sdks release）
+      - name: Install Theos
+        if: steps.theos.outputs.cache-hit != 'true'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)"
+
+      - name: Ensure iPhoneOS16.5 SDK
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk" ]; then
+            "$THEOS/bin/install-sdk" iPhoneOS16.5.sdk
+          fi
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk"
+
+      - name: Build ios16 / ios17 debs
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: tag 必须形如 v0.0.11，实际为 $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          PACKAGE_ID="$(awk -F': ' '/^Package:/{print $2; exit}' control)"
+          mkdir -p dist packages
+
+          for spec in ios16:16.0 ios17:15.0; do
+            label="${spec%%:*}"
+            deployment="${spec##*:}"
+            echo "==> Building $label (SDK 16.5, deployment $deployment)"
+            find packages -maxdepth 1 -type f -name '*.deb' -delete
+            make clean >/dev/null
+            THEOS_PACKAGE_SCHEME=roothide \
+              TARGET="iphone:clang:16.5:${deployment}" \
+              make package FINALPACKAGE=1 PACKAGE_VERSION="$VERSION"
+            src="$(find packages -maxdepth 1 -type f -name "${PACKAGE_ID}_${VERSION}_*.deb" -print -quit)"
+            if [ -z "$src" ]; then
+              echo "error: $label 未产出 deb" >&2
+              exit 1
+            fi
+            mv "$src" "dist/${PACKAGE_ID}_${VERSION}_${label}_iphoneos-arm64e.deb"
+          done
+          ls -lh dist/
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotosVideoSpeed-${{ github.ref_name }}
+          path: dist/*.deb
+          if-no-files-found: error
+
+      - name: Attach debs to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --json id >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.deb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.deb \
+              --title "PhotosVideoSpeed ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi
