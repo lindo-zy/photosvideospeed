@@ -19,7 +19,13 @@
 ## 构建
 
 ```
+./build.sh
+```
+
+一键产出 iOS 16 / iOS 17 两个平台的 deb（`packages/ios16/`、`packages/ios17/`），双平台完成后自动推进 control 版本号。单平台手动打包用：
+
+```
 make THEOS=/Users/xiao/dev/theos-roothide package FINAL=1
 ```
 
-产物在 `packages/` 下（iphoneos-arm64e，roothide）。
+产物为 iphoneos-arm64e（roothide）。
