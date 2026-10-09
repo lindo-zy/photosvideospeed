@@ -276,22 +276,23 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 - (void)buildPanelIfNeeded {
     if (self.panelView) return;
 
+    // 单行细条：高 28，全部控件垂直居中
     UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
     panel.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-    panel.layer.cornerRadius = 16;
+    panel.layer.cornerRadius = 14;
     panel.translatesAutoresizingMaskIntoConstraints = NO;
 
     // 播放/暂停
     UIButton *play = [UIButton buttonWithType:UIButtonTypeCustom];
     play.translatesAutoresizingMaskIntoConstraints = NO;
     play.tintColor = [UIColor whiteColor];
-    [play setImage:[self symbol:@"play.fill" pointSize:18] forState:UIControlStateNormal];
+    [play setImage:[self symbol:@"play.fill" pointSize:14] forState:UIControlStateNormal];
     [play addTarget:self action:@selector(togglePlayPause) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:play];
 
     // 时间标签 00:03 / 00:21
     UILabel *time = [[UILabel alloc] initWithFrame:CGRectZero];
-    time.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
+    time.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
     time.textColor = [UIColor colorWithWhite:1.0 alpha:0.9];
     time.text = @"00:00 / 00:00";
     time.translatesAutoresizingMaskIntoConstraints = NO;
@@ -310,11 +311,11 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     // 倍速按钮：1x 时显示"倍速"，其他倍速显示当前速度；点按循环，长按菜单直选
     UIButton *speed = [UIButton buttonWithType:UIButtonTypeCustom];
-    speed.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    speed.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
     [speed setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     speed.translatesAutoresizingMaskIntoConstraints = NO;
-    [speed.widthAnchor constraintGreaterThanOrEqualToConstant:42].active = YES;
-    [speed.heightAnchor constraintGreaterThanOrEqualToConstant:32].active = YES;
+    [speed.widthAnchor constraintGreaterThanOrEqualToConstant:36].active = YES;
+    [speed.heightAnchor constraintGreaterThanOrEqualToConstant:24].active = YES;
     [speed addTarget:self action:@selector(cycleSpeed) forControlEvents:UIControlEventTouchUpInside];
     [self rebuildMenuForButton:speed];
     [panel addSubview:speed];
@@ -327,37 +328,37 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
     UIButton *collapse = [UIButton buttonWithType:UIButtonTypeCustom];
     collapse.tintColor = [UIColor whiteColor];
-    [collapse setImage:[self symbol:@"chevron.down" pointSize:15] forState:UIControlStateNormal];
+    [collapse setImage:[self symbol:@"chevron.down" pointSize:12] forState:UIControlStateNormal];
     collapse.translatesAutoresizingMaskIntoConstraints = NO;
     [collapse addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:collapse];
 
     [panel addConstraints:@[
-        [play.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:10],
+        [play.leadingAnchor constraintEqualToAnchor:panel.leadingAnchor constant:8],
         [play.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
-        [play.widthAnchor constraintEqualToConstant:32],
-        [play.heightAnchor constraintEqualToConstant:32],
+        [play.widthAnchor constraintEqualToConstant:24],
+        [play.heightAnchor constraintEqualToConstant:24],
 
-        [time.leadingAnchor constraintEqualToAnchor:play.trailingAnchor constant:8],
-        [time.topAnchor constraintEqualToAnchor:panel.topAnchor constant:6],
+        [time.leadingAnchor constraintEqualToAnchor:play.trailingAnchor constant:6],
+        [time.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
 
-        [slider.leadingAnchor constraintEqualToAnchor:play.trailingAnchor constant:10],
-        [slider.topAnchor constraintEqualToAnchor:time.bottomAnchor],
-        [slider.heightAnchor constraintEqualToConstant:26],
+        [slider.leadingAnchor constraintEqualToAnchor:time.trailingAnchor constant:6],
+        [slider.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
+        [slider.heightAnchor constraintEqualToConstant:20],
 
-        [speed.leadingAnchor constraintEqualToAnchor:slider.trailingAnchor constant:4],
+        [speed.leadingAnchor constraintEqualToAnchor:slider.trailingAnchor constant:2],
         [speed.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
 
-        [divider.leadingAnchor constraintEqualToAnchor:speed.trailingAnchor constant:6],
+        [divider.leadingAnchor constraintEqualToAnchor:speed.trailingAnchor constant:4],
         [divider.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
         [divider.widthAnchor constraintEqualToConstant:1],
-        [divider.heightAnchor constraintEqualToConstant:28],
+        [divider.heightAnchor constraintEqualToConstant:20],
 
-        [collapse.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor constant:4],
-        [collapse.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-4],
+        [collapse.leadingAnchor constraintEqualToAnchor:divider.trailingAnchor constant:2],
+        [collapse.trailingAnchor constraintEqualToAnchor:panel.trailingAnchor constant:-2],
         [collapse.centerYAnchor constraintEqualToAnchor:panel.centerYAnchor],
-        [collapse.widthAnchor constraintEqualToConstant:40],
-        [collapse.heightAnchor constraintEqualToConstant:40],
+        [collapse.widthAnchor constraintEqualToConstant:28],
+        [collapse.heightAnchor constraintEqualToConstant:28],
     ]];
     // 面板右缘由 collapse 撑住；slider 右缘贴 speed，time 右缘不强约束
 
@@ -372,14 +373,14 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     // 收起态的展开按钮
     UIButton *expand = [UIButton buttonWithType:UIButtonTypeCustom];
     expand.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-    expand.layer.cornerRadius = 16;
+    expand.layer.cornerRadius = 9;
     expand.tintColor = [UIColor whiteColor];
-    [expand setImage:[self symbol:@"chevron.up" pointSize:17] forState:UIControlStateNormal];
+    [expand setImage:[self symbol:@"chevron.up" pointSize:11] forState:UIControlStateNormal];
     expand.translatesAutoresizingMaskIntoConstraints = NO;
     expand.accessibilityLabel = @"展开播放面板";
     [expand addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
-    [expand.widthAnchor constraintEqualToConstant:56].active = YES;
-    [expand.heightAnchor constraintEqualToConstant:56].active = YES;
+    [expand.widthAnchor constraintEqualToConstant:28].active = YES;
+    [expand.heightAnchor constraintEqualToConstant:28].active = YES;
     self.expandButton = expand;
 
     [self updateSpeedButtonTitle];
@@ -407,15 +408,15 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
             [self.panelView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
             [self.panelView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
             self.panelTopConstraint,
-            [self.panelView.heightAnchor constraintEqualToConstant:54],
+            [self.panelView.heightAnchor constraintEqualToConstant:28],
         ];
         [NSLayoutConstraint activateConstraints:self.panelPlacement];
     }
-    // 面板顶部锚到主视频下缘（贴着视频下方，不遮预览条/系统菜单）；
+    // 面板顶部锚到主视频下缘（细条压在预览条上方，不遮系统菜单）；
     // 视频接近满屏放不下时回退到底部安全区上方
     CGRect videoFrame = self.videoFrameInWindow;
-    CGFloat desiredTop = CGRectGetMaxY(videoFrame) + 8;
-    CGFloat maxTop = window.bounds.size.height - window.safeAreaInsets.bottom - 54 - 8;
+    CGFloat desiredTop = CGRectGetMaxY(videoFrame) + 4;
+    CGFloat maxTop = window.bounds.size.height - window.safeAreaInsets.bottom - 28 - 8;
     if (desiredTop > maxTop) desiredTop = maxTop;
     if (desiredTop < window.safeAreaInsets.top + 8) desiredTop = window.safeAreaInsets.top + 8;
     if (self.panelTopConstraint.constant != desiredTop) {
@@ -486,7 +487,7 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     NSString *name = (player && player.rate != 0) ? @"pause.fill" : @"play.fill";
     UIImage *current = [self.playButton imageForState:UIControlStateNormal];
     if ([current.description rangeOfString:name].location == NSNotFound) {
-        [self.playButton setImage:[self symbol:name pointSize:18] forState:UIControlStateNormal];
+        [self.playButton setImage:[self symbol:name pointSize:14] forState:UIControlStateNormal];
     }
 }
 
