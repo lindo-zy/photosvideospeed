@@ -316,7 +316,8 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 
 - (void)setSpeedIndex:(NSInteger)index {
     if (index < 0 || index >= (NSInteger)PSVSpeeds().count) return;
-    self.speedIndex = index;
+    // 必须直接写 ivar：speedIndex 的 setter 就是本方法，self.speedIndex = index 会无限递归（0.0.2 点按钮爆栈的根因）
+    _speedIndex = index;
     [self updateButtonTitle];
     [self rebuildMenuForButton:self.speedButton];
     [self applySpeed];
