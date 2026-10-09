@@ -1,7 +1,7 @@
 Package: com.lindo.photosvideospeed
 Name: PhotosVideoSpeed (相册视频倍速)
 Depends: mobilesubstrate, firmware (>= 15.0)
-Version: 0.0.1
+Version: 0.0.2
 Architecture: iphoneos-arm
 Description: 系统相册视频倍速播放，支持 0.5x / 1x / 1.5x / 2x / 3x。点按浮动按钮循环切换，长按弹出菜单直选。
 Maintainer: lindo

@@ -115,35 +115,46 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     return result;
 }
 
-// 递归找 window 内可见且"像正片"的 AVPlayerLayer；返回当前子树里可见面积最大者
-- (void)findPlayerLayer:(CALayer *)layer
-                 window:(UIWindow *)window
-                   best:(AVPlayerLayer **)bestOut
-                   area:(double *)bestArea {
-    if (!layer || layer.isHidden || layer.opacity < 0.02) return;
+// 迭代找 window 内可见且"像正片"的 AVPlayerLayer；返回子树里可见面积最大者。
+// 必须迭代 + 已访问集合：相册的 CALayer 树极深且可能成环，递归会打穿主栈（已导致线上 SIGSEGV）。
+- (void)findPlayerLayerInWindow:(UIWindow *)window
+                           best:(AVPlayerLayer **)bestOut
+                           area:(double *)bestArea {
+    NSHashTable *visited = [NSHashTable weakObjectsHashTable];
+    NSMutableArray<CALayer *> *stack = [NSMutableArray array];
+    [stack addObject:window.layer];
+    NSUInteger visitedCount = 0;
+    while (stack.count > 0) {
+        if (++visitedCount > 4096) return; // 层节点数保险丝
+        CALayer *layer = [stack lastObject];
+        [stack removeLastObject];
+        if (!layer || [visited containsObject:layer]) continue;
+        [visited addObject:layer];
+        if (layer.isHidden || layer.opacity < 0.02) continue;
 
-    if ([layer isKindOfClass:[AVPlayerLayer class]]) {
-        AVPlayer *player = ((AVPlayerLayer *)layer).player;
-        AVPlayerItem *item = player.currentItem;
-        if (player && item) {
-            CGSize size = item.presentationSize;
-            double duration = CMTimeGetSeconds(item.duration);
-            // 有画面、时长 > 0.25s：排除实况照片预览和纯音频
-            if (size.width > 1 && size.height > 1 && duration > 0.25) {
-                CALayer *rootLayer = window.layer;
-                CGRect rect = [layer convertRect:layer.bounds toLayer:rootLayer];
-                CGRect visible = CGRectIntersection(rect, rootLayer.bounds);
-                double area = visible.size.width * visible.size.height;
-                if (area > *bestArea) {
-                    *bestArea = area;
-                    *bestOut = (AVPlayerLayer *)layer;
+        if ([layer isKindOfClass:[AVPlayerLayer class]]) {
+            AVPlayer *player = ((AVPlayerLayer *)layer).player;
+            AVPlayerItem *item = player.currentItem;
+            if (player && item) {
+                CGSize size = item.presentationSize;
+                double duration = CMTimeGetSeconds(item.duration);
+                // 有画面、时长 > 0.25s：排除实况照片预览和纯音频
+                if (size.width > 1 && size.height > 1 && duration > 0.25) {
+                    CALayer *rootLayer = window.layer;
+                    CGRect rect = [layer convertRect:layer.bounds toLayer:rootLayer];
+                    CGRect visible = CGRectIntersection(rect, rootLayer.bounds);
+                    double area = visible.size.width * visible.size.height;
+                    if (area > *bestArea) {
+                        *bestArea = area;
+                        *bestOut = (AVPlayerLayer *)layer;
+                    }
                 }
             }
         }
-    }
 
-    for (CALayer *sub in layer.sublayers) {
-        [self findPlayerLayer:sub window:window best:bestOut area:bestArea];
+        for (CALayer *sub in layer.sublayers) {
+            [stack addObject:sub];
+        }
     }
 }
 
@@ -161,15 +172,17 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     for (UIWindow *window in [self visibleWindows]) {
         AVPlayerLayer *found = nil;
         double area = 0;
-        [self findPlayerLayer:window.layer window:window best:&found area:&area];
-        if (found && area > bestArea) {
+        [self findPlayerLayerInWindow:window best:&found area:&area];
+        // 全屏判定：层面积 ≥ 窗口 35%。网格里实况照片/视频的自动播放小预览直接出局
+        double windowArea = window.bounds.size.width * window.bounds.size.height;
+        if (found && windowArea > 0 && area >= windowArea * 0.35 && area > bestArea) {
             bestArea = area;
             best = found;
             bestWindow = window;
         }
     }
 
-    if (best && bestWindow && bestArea > 100) { // 面积下限：忽略缩略图级别的小预览
+    if (best && bestWindow) {
         AVPlayer *player = best.player;
         BOOL rebound = (player != self.player);
         self.player = player;
@@ -235,18 +248,18 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (!window) return;
 
     if (!self.speedButton) {
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        UIButtonConfiguration *config = [UIButtonConfiguration plainButtonConfiguration];
-        config.contentInsets = NSDirectionalEdgeInsetsMake(6, 10, 6, 10);
-        config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-        button.configuration = config;
-        button.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
-        button.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium];
+        // 固定尺寸胶囊：黑 60% 底 + 白色等宽字。不用自适应尺寸（不同系统版本下会被撑成大方块）
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.6];
+        button.layer.cornerRadius = 13;
+        button.titleLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
         [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         button.translatesAutoresizingMaskIntoConstraints = NO;
         button.accessibilityLabel = @"相册视频倍速";
         [button addTarget:self action:@selector(cycleSpeed) forControlEvents:UIControlEventTouchUpInside];
         [self rebuildMenuForButton:button];
+        [button.widthAnchor constraintEqualToConstant:46].active = YES;
+        [button.heightAnchor constraintEqualToConstant:26].active = YES;
         self.speedButton = button;
     }
 
