@@ -167,7 +167,16 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
                     if (area > *bestArea) {
                         *bestArea = area;
                         *bestOut = (AVPlayerLayer *)layer;
-                        *frameOut = visible;
+                        // 锚定用可见视频内容区（videoRect）：播放层 frame 含黑边/衬底，
+                        // 直接用层 frame 会把面板放到层底（盖住预览条/菜单）而不是视频内容的下缘
+                        CGRect contentRect = visible;
+                        CGRect videoRect = ((AVPlayerLayer *)layer).videoRect;
+                        if (!CGRectIsEmpty(videoRect)) {
+                            CGRect content = [layer convertRect:videoRect toLayer:rootLayer];
+                            content = CGRectIntersection(content, rootLayer.bounds);
+                            if (!CGRectIsEmpty(content)) contentRect = content;
+                        }
+                        *frameOut = contentRect;
                     }
                 }
             }
@@ -412,10 +421,10 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
         ];
         [NSLayoutConstraint activateConstraints:self.panelPlacement];
     }
-    // 面板顶部锚到主视频下缘（细条压在预览条上方，不遮系统菜单）；
+    // 面板叠在视频内容内部、底边对齐视频内容下缘（上收 4pt）；
     // 视频接近满屏放不下时回退到底部安全区上方
     CGRect videoFrame = self.videoFrameInWindow;
-    CGFloat desiredTop = CGRectGetMaxY(videoFrame) + 4;
+    CGFloat desiredTop = CGRectGetMaxY(videoFrame) - 28 - 4;
     CGFloat maxTop = window.bounds.size.height - window.safeAreaInsets.bottom - 28 - 8;
     if (desiredTop > maxTop) desiredTop = maxTop;
     if (desiredTop < window.safeAreaInsets.top + 8) desiredTop = window.safeAreaInsets.top + 8;
