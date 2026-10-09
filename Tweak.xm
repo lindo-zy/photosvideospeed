@@ -3,7 +3,7 @@
 // 轮询扫描 CALayer 树找到可见的 AVPlayerLayer，对其 AVPlayer 施加公开 API rate。
 // 支持 0.5x / 1x / 1.5x / 2x / 3x。
 // UI：底部播放控制面板（播放/暂停 + 时间 + 进度条 + 倍速 + 收起按钮），
-//     点 chevron.down 收起后只剩右下角 chevron.up 小按钮，点它展开。
+//     点 chevron.down 收起后只剩面板原位右端的 chevron.up 小按钮，点它展开。
 
 #import <UIKit/UIKit.h>
 #import <AVFoundation/AVFoundation.h>
@@ -39,7 +39,7 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 @property (nonatomic, strong) UIButton *speedButton;       // "倍速"/"2x"
 @property (nonatomic, strong) UIView *dividerView;
 @property (nonatomic, strong) UIButton *collapseButton;    // 面板内 chevron.down
-@property (nonatomic, strong) UIButton *expandButton;      // 收起后右下角 chevron.up
+@property (nonatomic, strong) UIButton *expandButton;      // 收起后面板原位右端的 chevron.up
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *panelPlacement;
 @property (nonatomic, strong) NSArray<NSLayoutConstraint *> *expandPlacement;
 @property (nonatomic, strong) NSLayoutConstraint *panelTopConstraint;  // 面板顶部锚在主视频下缘
@@ -235,6 +235,15 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 - (void)applySpeed {
     AVPlayer *player = self.player;
     if (!player || player.rate == 0) return; // 暂停中只记忆不强设，播放时由 displayTick 兜底
+
+    [self forceRateToUserSpeed];
+}
+
+// 无条件把播放器拉到用户倍速（含从暂停恢复播放）。applySpeed 对 rate==0 的播放器直接
+// return（那是守护路径的语义），0.0.8 及之前暂停后点播放无效的根因就是恢复误走了它
+- (void)forceRateToUserSpeed {
+    AVPlayer *player = self.player;
+    if (!player) return;
 
     double target = self.userSpeed;
     AVPlayerItem *item = player.currentItem;
@@ -436,10 +445,11 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
         self.expandPlacement = nil;
         [self.expandButton removeFromSuperview];
         [window addSubview:self.expandButton];
-        UILayoutGuide *safe = window.safeAreaLayoutGuide;
+        // 占住面板原位右端（与面板内收起按钮同一位置），面板移动时跟随；
+        // 不锚窗口右下角——那里是相册底部工具栏，会压住删除按钮
         self.expandPlacement = @[
-            [self.expandButton.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
-            [self.expandButton.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-20],
+            [self.expandButton.trailingAnchor constraintEqualToAnchor:self.panelView.trailingAnchor constant:0],
+            [self.expandButton.topAnchor constraintEqualToAnchor:self.panelView.topAnchor constant:0],
         ];
         [NSLayoutConstraint activateConstraints:self.expandPlacement];
     }
@@ -484,9 +494,9 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     AVPlayer *player = self.player;
     if (!player) return;
     if (player.rate != 0) {
-        player.rate = 0;     // 暂停
+        [player pause];      // 暂停
     } else {
-        [self applySpeed];   // 直接以用户倍速恢复，不走 play()（会把速度重置为 1x）
+        [self forceRateToUserSpeed]; // 直接以用户倍速恢复，不走 play()（会把速度重置为 1x）
     }
     [self updatePlayButtonIcon];
 }
