@@ -14,6 +14,7 @@ xcrun clang -O2 -fobjc-arc -fblocks -Wall -Wextra -Werror \
 python3 "$test_dir/extract_manager_methods.py" \
     "$test_dir/../Tweak.xm" "$test_tmp/ProductionManagerMethods.inc"
 xcrun clang -O2 -fobjc-arc -fblocks -Wall -Wextra -Werror \
-    -framework Foundation -framework AVFoundation -framework CoreMedia \
+    -framework Foundation -framework AVFoundation -framework QuartzCore \
+    -framework CoreMedia \
     -I "$test_tmp" "$test_dir/ManagerRegressionTests.m" -o "$test_tmp/manager-regression-tests"
 "$test_tmp/manager-regression-tests"

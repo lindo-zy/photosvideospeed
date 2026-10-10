@@ -6,7 +6,8 @@ from pathlib import Path
 
 source = Path(sys.argv[1]).read_text()
 methods = []
-for signature in ("- (BOOL)bindPlayer:", "- (void)fadeView:", "- (void)sliderTouchEnded"):
+for signature in ("- (BOOL)bindPlayer:", "- (void)fadeView:", "- (void)hideViewNow:",
+                  "- (BOOL)videoLayerIsGone", "- (void)sliderTouchEnded"):
     # Production top-level method closing braces are unindented. The nested
     # blocks in these methods are indented; reject ambiguous/missing matches.
     matches = list(re.finditer(r"^" + re.escape(signature) + r".*?^}", source, re.M | re.S))

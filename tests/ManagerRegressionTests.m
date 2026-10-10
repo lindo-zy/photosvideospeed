@@ -21,11 +21,16 @@ static NSMutableArray *mainCallbacks;
 @interface UIView : NSObject
 @property (nonatomic) BOOL hidden;
 @property (nonatomic) double alpha;
+@property (nonatomic, strong) CALayer *layer;
 + (void)animateWithDuration:(NSTimeInterval)duration delay:(NSTimeInterval)delay
                     options:(UIViewAnimationOptions)options animations:(void (^)(void))animations
                  completion:(void (^)(BOOL finished))completion;
 @end
 @implementation UIView
+- (CALayer *)layer {
+    if (!_layer) _layer = [[CALayer alloc] init];
+    return _layer;
+}
 + (void)animateWithDuration:(NSTimeInterval)duration delay:(NSTimeInterval)delay
                     options:(UIViewAnimationOptions)options animations:(void (^)(void))animations
                  completion:(void (^)(BOOL finished))completion {
@@ -88,12 +93,15 @@ static void PSVTestDispatchAsync(dispatch_queue_t queue, dispatch_block_t block)
 @property (nonatomic, strong) UISlider *slider;
 @property (nonatomic, strong) UIView *panelView;
 @property (nonatomic, strong) UIView *expandButton;
+@property (nonatomic, weak) AVPlayerLayer *videoLayer;
 @property (nonatomic) BOOL panelHiddenRequested;
 @property (nonatomic) BOOL expandHiddenRequested;
 @property (nonatomic) NSUInteger resumeCount;
 @property (nonatomic) NSUInteger progressCount;
 - (BOOL)bindPlayer:(AVPlayer *)player;
 - (void)fadeView:(UIView *)view hidden:(BOOL)hidden;
+- (void)hideViewNow:(UIView *)view;
+- (BOOL)videoLayerIsGone;
 - (void)sliderTouchEnded;
 - (void)forceRateToUserSpeed;
 - (void)updateProgressNow;
@@ -207,6 +215,59 @@ static void TestFadeRace(void) {
     Check(animationCompletions.count == count, @"nil view is safely ignored");
 }
 
+static void TestInstantHide(void) {
+    [animationCompletions removeAllObjects];
+    PSVTestManager *manager = Manager();
+    [manager fadeView:manager.panelView hidden:NO];
+    [manager fadeView:manager.expandButton hidden:NO];
+    [manager hideViewNow:manager.panelView];
+    Check(manager.panelHiddenRequested && manager.panelView.hidden && manager.panelView.alpha == 0,
+          @"leaving the video hides the panel in the same frame without fading");
+    [manager hideViewNow:manager.expandButton];
+    Check(manager.expandHiddenRequested && manager.expandButton.hidden && manager.expandButton.alpha == 0,
+          @"leaving the video hides the expand button in the same frame without fading");
+    CompleteAnimation(0, YES);
+    CompleteAnimation(1, YES);
+    Check(manager.panelView.hidden && manager.panelHiddenRequested &&
+          manager.expandButton.hidden && manager.expandHiddenRequested,
+          @"in-flight fade completions cannot resurrect views hidden by leaving the video");
+    [manager fadeView:manager.panelView hidden:NO];
+    Check(!manager.panelHiddenRequested && !manager.panelView.hidden && manager.panelView.alpha == 1,
+          @"a later video fades the instantly hidden panel back in");
+    NSUInteger count = animationCompletions.count;
+    [manager hideViewNow:nil];
+    Check(animationCompletions.count == count, @"nil view is safely ignored by hideViewNow");
+}
+
+static void TestVideoLayerGone(void) {
+    PSVTestManager *manager = Manager();
+    manager.player = Player(); // 探测只在已绑定播放器时进行
+    CALayer *root = [[CALayer alloc] init];
+    AVPlayerLayer *layer = [[AVPlayerLayer alloc] init];
+    layer.player = manager.player;
+    [root addSublayer:layer];
+    manager.videoLayer = layer;
+    Check(![manager videoLayerIsGone], @"attached bound video layer counts as visible");
+    [layer removeFromSuperlayer];
+    Check([manager videoLayerIsGone], @"detached video layer is gone");
+    [root addSublayer:layer];
+    Check(![manager videoLayerIsGone], @"reattached video layer counts as visible");
+    layer.hidden = YES;
+    Check([manager videoLayerIsGone], @"hidden video layer is gone");
+    layer.hidden = NO;
+    layer.opacity = 0.01;
+    Check([manager videoLayerIsGone], @"fully transparent video layer is gone");
+    layer.opacity = 1;
+    layer.player = nil;
+    Check([manager videoLayerIsGone], @"video layer whose player detached is gone");
+    layer.player = manager.player;
+    manager.videoLayer = nil;
+    Check([manager videoLayerIsGone], @"released video layer is gone");
+    manager.player = nil;
+    manager.videoLayer = layer;
+    Check(![manager videoLayerIsGone], @"unbound manager skips the probe instead of rescanning");
+}
+
 static void BeginSeek(PSVTestManager *manager, float target, BOOL resume) {
     manager.userTracking = YES;
     manager.resumeAfterScrub = resume;
@@ -281,6 +342,8 @@ int main(void) {
         mainCallbacks = [NSMutableArray array];
         TestBinding();
         TestFadeRace();
+        TestInstantHide();
+        TestVideoLayerGone();
         TestSeekSwitching();
         printf("PASS: production manager methods with UIKit scheduling stubs (%lu assertions)\n", (unsigned long)checks);
     }

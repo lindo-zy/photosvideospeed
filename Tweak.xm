@@ -33,6 +33,7 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 @property (nonatomic, assign) NSInteger speedIndex;        // 用户选定的倍速下标（默认 1 = 1x）
 @property (nonatomic, strong) CADisplayLink *displayLink;  // 视频可见期间的低频守护（拦系统播放键重置）
 @property (nonatomic, strong) NSTimer *scanTimer;          // 0.5s 兜底扫描（探测视频出现/消失）
+@property (nonatomic, weak) AVPlayerLayer *videoLayer;     // 上次命中的视频层（弱引用，供关闭即时探测）
 @property (nonatomic, assign) BOOL appActive;
 
 // 面板 UI
@@ -182,12 +183,14 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (best && bestWindow) {
         AVPlayer *player = best.player;
         BOOL rebound = [self bindPlayer:player];
+        self.videoLayer = best; // 弱引用盯住，关闭时 displayTick 立刻发现
         self.videoFrameInWindow = bestFrame; // 面板用它锚定到主视频下缘
         if (rebound) [self applySpeed]; // 换了播放器或视频：重新施加记忆倍速
         [self updateOverlayVisibilityInWindow:bestWindow];
         [self startDisplayLinkIfNeeded];
     } else {
         [self bindPlayer:nil];
+        self.videoLayer = nil;
         [self updateOverlayVisibilityInWindow:nil];
         self.displayLink.paused = YES;
     }
@@ -244,7 +247,20 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
     if (self.userSpeed != 1.0 && player.rate == 1.0) {
         [self applySpeed];
     }
+    // 视频关闭即时探测：0.5s 兜底扫描平均要等 250ms，面板会明显晚于视频消失；
+    // 上次命中的层被移除/隐藏/解绑时立刻重扫确认（scanNow 找不到视频才会真正隐藏）
+    if ([self videoLayerIsGone]) [self scanNow];
     [self updatePlayButtonIcon];
+}
+
+// 弱引用视频层的存活快查。判据与 PSVFindMainVideoLayer 的"可见"语义对齐：
+// 层被释放/脱离层级/隐藏/透明/播放器解绑都视为视频已关；误判由 scanNow 复核兜底。
+// 祖先层被隐藏等情况查不到，仍交给 0.5s 兜底扫描。
+- (BOOL)videoLayerIsGone {
+    if (!self.player) return NO; // 未绑定时不探测，避免解除绑定后反复空扫
+    AVPlayerLayer *layer = self.videoLayer;
+    return !layer || layer.hidden || layer.opacity < 0.02 ||
+        layer.player == nil || layer.superlayer == nil;
 }
 
 #pragma mark - 面板 UI
@@ -374,10 +390,10 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
 - (void)updateOverlayVisibilityInWindow:(UIWindow *)window {
     [self buildPanelIfNeeded];
 
-    // 无视频：全部隐藏
+    // 无视频：全部隐藏。视频关闭要与视频消失同步，跳过淡出动画当帧隐藏
     if (!window) {
-        [self fadeView:self.panelView hidden:YES];
-        [self fadeView:self.expandButton hidden:YES];
+        [self hideViewNow:self.panelView];
+        [self hideViewNow:self.expandButton];
         return;
     }
 
@@ -432,6 +448,17 @@ static NSArray<NSString *> *PSVSpeedLabels(void) {
         [self fadeView:self.expandButton hidden:NO];
     }
     [self updateProgressNow];
+}
+
+// 视频已关闭：不走 0.18s 淡出，当帧隐藏（收起/展开的渐变仍走 fadeView）。
+// 请求标志必须先更新，在途动画的完成回调按标志判定，不会把状态改回去。
+- (void)hideViewNow:(UIView *)view {
+    if (!view) return;
+    if (view == self.panelView) self.panelHiddenRequested = YES;
+    else self.expandHiddenRequested = YES;
+    [view.layer removeAllAnimations];
+    view.hidden = YES;
+    view.alpha = 0;
 }
 
 - (void)fadeView:(UIView *)view hidden:(BOOL)hidden {
